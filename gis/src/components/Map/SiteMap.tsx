@@ -121,6 +121,24 @@ interface OsmBaseLayerProps {
     : NonNullable<ReturnType<typeof useSiteAnalysisData>['data']>['roads'] | null;
 }
 
+// Module-level so the style prop keeps a stable identity: react-leaflet
+// re-runs setStyle() over every feature whenever it changes.
+const baseBuildingStyle = (f?: Feature<Geometry>): PathOptions => {
+  const lvl = (f?.properties as OsmBuildingProperties | undefined)?.levels ?? 1;
+  return {
+    color:       '#666',
+    weight:      0.8,
+    opacity:     0.9,
+    fillColor:   '#484848',
+    fillOpacity: Math.min(0.25 + lvl * 0.06, 0.85),
+  };
+};
+
+const baseRoadStyle = (f?: Feature<Geometry>): PathOptions => {
+  const s = getRoadStyle((f?.properties as OsmRoadProperties | undefined)?.highway ?? '');
+  return { color: s.colour, weight: s.weight, opacity: 0.85 };
+};
+
 const OsmBaseLayer: React.FC<{
   site:      SiteFeature | null;
   step:      AppStep;
@@ -130,14 +148,14 @@ const OsmBaseLayer: React.FC<{
 }> = ({ site, step, active, buildings, roads }) => {
   if (!site || step < 2) return null;
 
+  // 'context' / 'building_heights' / 'circulation' overlays draw these same
+  // buildings/roads themselves, so the base layer steps aside rather than
+  // rendering (and hit-testing) thousands of duplicate shapes underneath.
   const showBuildings =
-    active === 'context' ||
-    active === 'building_heights' ||
     active === 'developable' ||
     active === null;
 
   const showRoads =
-    active === 'circulation' ||
     active === 'noise' ||
     active === 'linkages' ||
     active === null;
@@ -148,25 +166,7 @@ const OsmBaseLayer: React.FC<{
         <GeoJSON
           key={`b-${site.properties.id}`}
           data={buildings}
-          style={(f?: Feature<Geometry>): PathOptions => {
-            const p   = f?.properties as OsmBuildingProperties | undefined;
-            const lvl = p?.levels ?? 1;
-            const fill =
-              active === 'building_heights'
-                ? lvl <= 3  ? '#cfe0f8'
-                : lvl <= 6  ? '#90b8f0'
-                : lvl <= 10 ? '#5090e0'
-                : lvl <= 15 ? '#2060c0'
-                :             '#103080'
-                : '#484848';
-            return {
-              color:       '#666',
-              weight:      0.8,
-              opacity:     0.9,
-              fillColor:   fill,
-              fillOpacity: Math.min(0.25 + lvl * 0.06, 0.85),
-            };
-          }}
+          style={baseBuildingStyle}
           onEachFeature={(f: Feature<Geometry>, l) => {
             const p     = f.properties as OsmBuildingProperties;
             const parts = [
@@ -188,12 +188,7 @@ const OsmBaseLayer: React.FC<{
         <GeoJSON
           key={`r-${site.properties.id}`}
           data={roads}
-          style={(f?: Feature<Geometry>): PathOptions => {
-            const s = getRoadStyle(
-              (f?.properties as OsmRoadProperties | undefined)?.highway ?? ''
-            );
-            return { color: s.colour, weight: s.weight, opacity: 0.85 };
-          }}
+          style={baseRoadStyle}
           onEachFeature={(f: Feature<Geometry>, l) => {
             const p = f.properties as OsmRoadProperties;
             const s = getRoadStyle(p.highway);
@@ -232,23 +227,27 @@ const Overlays: React.FC<{
   const centre: LatLngTuple = b ? [b.getCenter().lat, b.getCenter().lng] : [0, 0];
   const siteId = site?.properties.id ?? '';
 
-  // ── Derived data (Turf.js) computed once per site/contextData change ──────
-  // These are expensive (turf union/intersection loops) and must not
-  // recompute on every overlay toggle, only when the underlying data changes.
+  // ── Derived data (Turf.js) computed only while its overlay is shown ───────
+  // Computing these eagerly on data load blocked the main thread for every
+  // site, even when the user never opened the overlay that needs them.
+
+  const showNoise       = step === 2 && core  === 'noise';
+  const showCirculation = step === 2 && core  === 'circulation';
+  const showLinkages    = step === 3 && urban === 'linkages';
 
   const noiseZones = useMemo(
-    () => (contextData?.roads ? buildNoiseZones(contextData.roads) : null),
-    [contextData?.roads]
+    () => (showNoise && contextData?.roads ? buildNoiseZones(contextData.roads) : null),
+    [showNoise, contextData?.roads]
   );
 
   const accessPoints = useMemo(
-    () => (site && contextData?.roads ? findAccessPoints(site, contextData.roads) : []),
-    [site, contextData?.roads]
+    () => (showCirculation && site && contextData?.roads ? findAccessPoints(site, contextData.roads) : []),
+    [showCirculation, site, contextData?.roads]
   );
 
   const linkageLines = useMemo(
-    () => (site && contextData?.landmarks ? buildLinkageLinesFromLandmarks(site, contextData.landmarks, 5) : []),
-    [site, contextData?.landmarks]
+    () => (showLinkages && site && contextData?.landmarks ? buildLinkageLinesFromLandmarks(site, contextData.landmarks, 5) : []),
+    [showLinkages, site, contextData?.landmarks]
   );
 
   if (!site) return null;
@@ -359,6 +358,9 @@ export const SiteMap: React.FC<SiteMapProps> = ({
         zoom={DEFAULT_ZOOM}
         className="w-full h-full"
         zoomControl={false}
+        // Canvas draws thousands of OSM buildings/roads far faster than one
+        // SVG DOM node per shape.
+        preferCanvas
       >
         <DynamicTileLayer step={step} />
         <MapCamera site={selectedSite} step={step} />

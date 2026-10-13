@@ -20,6 +20,19 @@ function levelsToColour(levels: number | undefined): string {
   return '#103080';
 }
 
+// Module-level so the style prop keeps a stable identity: react-leaflet
+// re-runs setStyle() over every feature whenever it changes.
+const heightStyle = (f?: Feature<Geometry>): PathOptions => {
+  const lvl = (f?.properties as OsmBuildingProperties | undefined)?.levels;
+  return {
+    color:       '#3878c8',
+    weight:      1,
+    opacity:     0.9,
+    fillColor:   levelsToColour(lvl),
+    fillOpacity: Math.min(0.3 + (lvl ?? 1) * 0.04, 0.9),
+  };
+};
+
 export const BuildingHeightsOverlay: React.FC<Props> = ({ osmBuildings }) => {
   if (!osmBuildings || osmBuildings.features.length === 0) return null;
 
@@ -27,17 +40,7 @@ export const BuildingHeightsOverlay: React.FC<Props> = ({ osmBuildings }) => {
     <GeoJSON
       key={`bh-${osmBuildings.features.length}`}
       data={osmBuildings}
-      style={(f?: Feature<Geometry>): PathOptions => {
-        const p   = f?.properties as OsmBuildingProperties | undefined;
-        const lvl = p?.levels;
-        return {
-          color:       '#3878c8',
-          weight:      1,
-          opacity:     0.9,
-          fillColor:   levelsToColour(lvl),
-          fillOpacity: Math.min(0.3 + (lvl ?? 1) * 0.04, 0.9),
-        };
-      }}
+      style={heightStyle}
       onEachFeature={(f: Feature<Geometry>, layer) => {
         const p     = f.properties as OsmBuildingProperties;
         const parts = [

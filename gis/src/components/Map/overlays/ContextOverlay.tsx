@@ -24,6 +24,17 @@ interface Props {
   siteId:    string;
 }
 
+// Module-level so the style prop keeps a stable identity: react-leaflet
+// re-runs setStyle() over every feature whenever it changes.
+const contextStyle = (): PathOptions => ({
+  color:       '#9e8e7a',
+  weight:      1.5,
+  opacity:     0.9,
+  fillColor:   '#9e8e7a',
+  fillOpacity: 0.25,
+  dashArray:   '4 3',
+});
+
 export const ContextOverlay: React.FC<Props> = ({ buildings, siteId }) => {
   if (!buildings || buildings.features.length === 0) return null;
 
@@ -33,14 +44,7 @@ export const ContextOverlay: React.FC<Props> = ({ buildings, siteId }) => {
       // preventing stale geometry from the previous site being displayed.
       key={`ctx-${siteId}-${buildings.features.length}`}
       data={buildings}
-      style={(): PathOptions => ({
-        color:       '#9e8e7a',
-        weight:      1.5,
-        opacity:     0.9,
-        fillColor:   '#9e8e7a',
-        fillOpacity: 0.25,
-        dashArray:   '4 3',
-      })}
+      style={contextStyle}
       onEachFeature={(f: Feature<Geometry>, layer) => {
         const p = f.properties as OsmBuildingProperties;
 

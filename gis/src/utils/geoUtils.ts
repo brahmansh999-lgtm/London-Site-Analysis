@@ -4,6 +4,7 @@ import type {
   Polygon,
   MultiPolygon,
   LineString,
+  MultiLineString,
   Point,
   Position,
   GeoJsonProperties,
@@ -14,8 +15,7 @@ import turfArea     from '@turf/area';
 import turfBuffer   from '@turf/buffer';
 import turfCenter   from '@turf/center';
 import turfDistance from '@turf/distance';
-import turfUnion    from '@turf/union';
-import { point as turfPoint, featureCollection as turfFeatureCollection } from '@turf/helpers';
+import { point as turfPoint } from '@turf/helpers';
 import type { Units } from '@turf/helpers';
 
 // ─── Bounds & centroid ────────────────────────────────────────────────────────
@@ -313,26 +313,24 @@ export function buildNoiseZones(roads: RoadFeatureCollection): NoiseZoneCollecti
     { radiusM: 65, noiseLevel: 'low',      colour: '#ffcc20', opacity: 0.12, label: 'Low' },
   ];
 
+  if (noiseRoads.length === 0) return { type: 'FeatureCollection', features: [] };
+
+  // Buffer all noisy roads as ONE MultiLineString: the buffer op dissolves
+  // overlaps itself, so each band comes out as a single merged shape without
+  // a per-road buffer + pairwise union loop (which took seconds on busy sites).
+  const allRoads: Feature<MultiLineString> = {
+    type: 'Feature',
+    geometry: { type: 'MultiLineString', coordinates: noiseRoads.map((r) => r.geometry.coordinates) },
+    properties: {},
+  };
+
   const features: Feature<Polygon | MultiPolygon, NoiseZoneProperties>[] = [];
   for (const band of bands) {
-    const buffers: Feature<Polygon | MultiPolygon>[] = [];
-    for (const road of noiseRoads) {
-      try {
-        const buf = turfBuffer(road, band.radiusM, { units: 'meters' as Units });
-        if (buf) buffers.push(buf as unknown as Feature<Polygon | MultiPolygon>);
-      } catch { /* skip segments that fail to buffer */ }
-    }
-    if (buffers.length === 0) continue;
-
-    // Dissolve all per-segment buffers for this band into a single shape so
-    // overlapping circles don't stack their strokes/opacity into a lattice.
-    let merged: Feature<Polygon | MultiPolygon> = buffers[0];
-    for (let i = 1; i < buffers.length; i++) {
-      try {
-        const u = turfUnion(turfFeatureCollection([merged, buffers[i]]));
-        if (u) merged = u as Feature<Polygon | MultiPolygon>;
-      } catch { /* keep previous merged shape if union fails */ }
-    }
+    let merged: Feature<Polygon | MultiPolygon> | null = null;
+    try {
+      merged = turfBuffer(allRoads, band.radiusM, { units: 'meters' as Units }) as unknown as Feature<Polygon | MultiPolygon>;
+    } catch { /* skip a band that fails to buffer */ }
+    if (!merged?.geometry) continue;
 
     features.push({
       type: 'Feature',
@@ -345,8 +343,14 @@ export function buildNoiseZones(roads: RoadFeatureCollection): NoiseZoneCollecti
 
 // ─── Overpass plumbing ────────────────────────────────────────────────────────
 
-const OVERPASS_PRIMARY  = 'https://overpass-api.de/api/interpreter';
-const OVERPASS_FALLBACK = 'https://overpass.kumi.systems/api/interpreter';
+// Public Overpass mirrors in preference order. Each one is individually
+// unreliable (rate limits, 406/504s, hangs), so ovpFetch hedges across them.
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+];
 
 interface ONode {
   type: 'node'; id: number; lat: number; lon: number;
@@ -414,11 +418,54 @@ async function fetchEndpoint(
   return null;
 }
 
+// If a mirror hasn't answered by then, bring in the next one in parallel and
+// take whichever responds first, instead of waiting out one mirror's full
+// retry cycle before even trying another. A mirror that fails outright hands
+// over to the next immediately.
+const OVERPASS_HEDGE_DELAY_MS = 4_000;
+
+function linkedController(parent: AbortSignal | undefined): AbortController {
+  const c = new AbortController();
+  if (parent?.aborted) c.abort();
+  else parent?.addEventListener('abort', () => c.abort(), { once: true });
+  return c;
+}
+
 async function ovpFetch(query: string, signal?: AbortSignal): Promise<OResp> {
   const body    = `data=${encodeURIComponent(query)}`;
   const headers: HeadersInit = { 'Content-Type': 'application/x-www-form-urlencoded' };
-  let res = await fetchEndpoint(OVERPASS_PRIMARY, body, headers, signal);
-  if (!res || !res.ok) res = await fetchEndpoint(OVERPASS_FALLBACK, body, headers, signal);
+
+  const controllers = OVERPASS_ENDPOINTS.map(() => linkedController(signal));
+
+  const res = await new Promise<Response | null>((resolve) => {
+    let next    = 0;
+    let pending = 0;
+    let done    = false;
+    let hedgeTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const launch = () => {
+      clearTimeout(hedgeTimer);
+      if (done || next >= OVERPASS_ENDPOINTS.length) return;
+      const i = next++;
+      pending++;
+      void fetchEndpoint(OVERPASS_ENDPOINTS[i], body, headers, controllers[i].signal).then((r) => {
+        pending--;
+        if (done) return;
+        if (r && r.ok) {
+          done = true;
+          clearTimeout(hedgeTimer);
+          controllers.forEach((c, j) => { if (j !== i) c.abort(); });
+          resolve(r);
+          return;
+        }
+        launch(); // this mirror failed — try the next one now
+        if (pending === 0) { done = true; resolve(null); }
+      });
+      hedgeTimer = setTimeout(launch, OVERPASS_HEDGE_DELAY_MS);
+    };
+    launch();
+  });
+
   if (!res || !res.ok) throw new Error('Overpass API unavailable — please try again in a moment.');
   return res.json() as Promise<OResp>;
 }
@@ -526,19 +573,22 @@ export async function fetchComprehensiveSiteContext(
   signal?: AbortSignal
 ): Promise<SiteContextData> {
   const around = `around:${radiusM},${lat},${lng}`;
+  // Landmark nodes are filtered server-side to the values classifyLandmark()
+  // keeps — fetching every amenity/leisure/tourism node (cafés, benches,
+  // bins…) made the response much larger only for it to be discarded.
   const query  = `
     [out:json][timeout:60];
     (
       way["building"](${around});
       relation["building"]["type"="multipolygon"](${around});
       way["highway"~"^(primary|secondary|tertiary|residential)$"](${around});
-      node["amenity"](${around});
+      node["amenity"~"^(bus_station|ferry_terminal|university|college|school|hospital|clinic|theatre|cinema|library|townhall|courthouse|police|place_of_worship)$"](${around});
       node["historic"](${around});
-      node["leisure"](${around});
+      node["leisure"~"^(park|garden|sports_centre|stadium)$"](${around});
       node["public_transport"="station"](${around});
-      node["tourism"](${around});
+      node["tourism"~"^(attraction|museum|gallery)$"](${around});
     );
-    out geom tags;
+    out geom tags qt;
   `;
 
   const data = await ovpFetch(query, signal);

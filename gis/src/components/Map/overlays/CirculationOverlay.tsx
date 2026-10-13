@@ -22,6 +22,15 @@ const AP_COLOUR: Record<string, string> = {
   residential: '#90b8c8',
 };
 
+// Module-level so the style prop keeps a stable identity: react-leaflet
+// re-runs setStyle() over every feature whenever it changes.
+const circulationStyle = (f?: Feature<Geometry>): PathOptions => {
+  const s = getRoadStyle(
+    (f?.properties as OsmRoadProperties | undefined)?.highway ?? ''
+  );
+  return { color: s.colour, weight: s.weight, opacity: 0.9 };
+};
+
 export const CirculationOverlay: React.FC<Props> = ({
   roads,
   accessPoints,
@@ -34,12 +43,7 @@ export const CirculationOverlay: React.FC<Props> = ({
       <GeoJSON
         key={`circ-${siteId}-${roads.features.length}`}
         data={roads}
-        style={(f?: Feature<Geometry>): PathOptions => {
-          const s = getRoadStyle(
-            (f?.properties as OsmRoadProperties | undefined)?.highway ?? ''
-          );
-          return { color: s.colour, weight: s.weight, opacity: 0.9 };
-        }}
+        style={circulationStyle}
         onEachFeature={(f: Feature<Geometry>, layer) => {
           const p     = f.properties as OsmRoadProperties;
           const s     = getRoadStyle(p.highway);

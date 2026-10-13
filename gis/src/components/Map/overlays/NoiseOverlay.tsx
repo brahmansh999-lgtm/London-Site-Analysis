@@ -12,6 +12,19 @@ interface Props {
   siteId:     string;
 }
 
+// Module-level so the style prop keeps a stable identity: react-leaflet
+// re-runs setStyle() over every feature whenever it changes.
+const noiseStyle = (f?: Feature<Geometry>): PathOptions => {
+  const p = f?.properties as NoiseZoneProperties | undefined;
+  return {
+    color:       p?.colour ?? '#ff2020',
+    weight:      0.25,
+    opacity:     0.35,
+    fillColor:   p?.colour ?? '#ff2020',
+    fillOpacity: p?.opacity ?? 0.2,
+  };
+};
+
 export const NoiseOverlay: React.FC<Props> = ({ noiseZones, siteId }) => {
   if (!noiseZones || noiseZones.features.length === 0) return null;
 
@@ -19,16 +32,7 @@ export const NoiseOverlay: React.FC<Props> = ({ noiseZones, siteId }) => {
     <GeoJSON
       key={`noise-${siteId}-${noiseZones.features.length}`}
       data={noiseZones}
-      style={(f?: Feature<Geometry>): PathOptions => {
-        const p = f?.properties as NoiseZoneProperties | undefined;
-        return {
-          color:       p?.colour ?? '#ff2020',
-          weight:      0.25,
-          opacity:     0.35,
-          fillColor:   p?.colour ?? '#ff2020',
-          fillOpacity: p?.opacity ?? 0.2,
-        };
-      }}
+      style={noiseStyle}
       onEachFeature={(f: Feature<Geometry>, layer) => {
         const p   = f.properties as NoiseZoneProperties;
         const lbl =
