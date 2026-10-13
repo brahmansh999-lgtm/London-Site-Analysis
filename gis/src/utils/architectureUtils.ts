@@ -526,7 +526,7 @@ function computeNoiseScore(
   for (const feature of (roads?.features ?? [])) {
     const hw = feature?.properties?.highway ?? 'residential';
     if (hw !== 'primary' && hw !== 'secondary') continue;
-    const coords = (feature.geometry as { coordinates: [number,number][] })?.coordinates;
+    const coords = (feature.geometry as unknown as { coordinates: [number,number][] })?.coordinates;
     if (!Array.isArray(coords)) continue;
     for (let i = 0; i < coords.length - 1; i++) {
       const [aLng, aLat] = coords[i]   ?? [0, 0];
